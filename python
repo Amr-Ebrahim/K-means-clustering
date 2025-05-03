@@ -1,0 +1,105 @@
+# 📌 Step 1: Install and import required libraries
+import numpy as np
+import cv2
+
+
+# 📁 Step 2: Upload the image
+print("👉 Please upload your image (e.g., 12.jpg)")
+uploaded = files.upload()
+
+# 📂 Step 3: Create output folder
+os.makedirs("Output", exist_ok=True)
+
+# 📷 Step 4: Define all required functions
+def kmeans(X, k, max_iters=1000, epsilon=1e-4):
+    np.random.seed(42)
+    centroids = X[np.random.choice(len(X), k, replace=False)]
+    for _ in range(max_iters):
+        distances = np.linalg.norm(X[:, None] - centroids[None, :], axis=2)
+        labels = np.argmin(distances, axis=1)
+        new_centroids = np.array([
+            X[labels == i].mean(axis=0) if np.any(labels == i) else centroids[i]
+            for i in range(k)
+        ])
+        shift = np.linalg.norm(new_centroids - centroids)
+        if shift < epsilon:
+            break
+        centroids = new_centroids
+    return labels, centroids
+
+def segment_image_with_kmeans(image_path, k):
+    image = cv2.imread(image_path)
+    if image is None:
+        raise FileNotFoundError(f"❌ Error: Could not load image at {image_path}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pixel_values = image.reshape((-1, 3)).astype(np.float32)
+    labels, centroids = kmeans(pixel_values, k)
+    segmented_image = centroids[labels].reshape(image.shape).astype(np.uint8)
+    return image, segmented_image, labels.reshape(image.shape[:2])
+
+def extract_number_mask(labels, target_cluster):
+    return (labels == target_cluster).astype(np.uint8) * 255
+
+def refine_mask(mask):
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+    return closed
+
+# 🧠 Step 5: Run the main pipeline
+try:
+    # Automatically get uploaded file name
+    uploaded_filename = list(uploaded.keys())[0]
+    image_path = uploaded_filename
+    input_number = os.path.splitext(uploaded_filename)[0]
+    k = 12  # Change this value if needed
+
+    original, segmented, label_map = segment_image_with_kmeans(image_path, k)
+
+    print("✅ Showing each cluster so you can pick the one(s) with the number:")
+    cluster_masks = []
+    for i in range(k):
+        raw_mask = extract_number_mask(label_map, target_cluster=i)
+        refined_mask = refine_mask(raw_mask)
+        cluster_masks.append(refined_mask)
+
+        plt.imshow(refined_mask, cmap='gray')
+        plt.title(f"Cluster {i}")
+        plt.axis('off')
+        plt.show()
+
+    TARGET_CLUSTERS = input("Enter the cluster indices (comma-separated) that contain the number: ")
+    target_indices = [int(i.strip()) for i in TARGET_CLUSTERS.split(",")]
+
+    combined_mask = np.zeros_like(cluster_masks[0])
+    for idx in target_indices:
+        combined_mask = cv2.bitwise_or(combined_mask, cluster_masks[idx])
+    number_mask = combined_mask
+
+    # Save mask
+    output_path = f"Output/{input_number}_number_mask.png"
+    cv2.imwrite(output_path, number_mask)
+    print(f"✅ Saved extracted mask to: {output_path}")
+
+    # Visualize results
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 3, 1)
+    plt.title("Original Image")
+    plt.imshow(original)
+    plt.axis('off')
+
+    plt.subplot(1, 3, 2)
+    plt.title("Segmented Image")
+    plt.imshow(segmented)
+    plt.axis('off')
+
+    plt.subplot(1, 3, 3)
+    plt.title("Extracted Number Mask")
+    plt.imshow(number_mask, cmap='gray')
+    plt.axis('off')
+    plt.show()
+
+except FileNotFoundError as e:
+    print(e)
+except Exception as e:
+    print(f"⚠️ An error occurred: {str(e)}")
