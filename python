@@ -1,105 +1,229 @@
-# 📌 Step 1: Install and import required libraries
-import numpy as np
 import cv2
+import numpy as np
+from threading import Thread
+from google.colab import files
+import os
+from google.colab.patches import cv2_imshow  # Import the Colab-compatible image display function
 
+def assign_labels_thread(start_idx, end_idx, pixels, centroids, labels):
+    """
+    Multithreaded pixel-to-centroid assignment
+    Args:
+        start_idx: Starting index for this thread
+        end_idx: Ending index for this thread
+        pixels: Array of pixel values
+        centroids: Current centroid positions
+        labels: Array to store the assigned labels
+    """
+    for i in range(start_idx, end_idx):
+        distances = np.linalg.norm(pixels[i] - centroids, axis=1)
+        labels[i] = np.argmin(distances)
 
-# 📁 Step 2: Upload the image
-print("👉 Please upload your image (e.g., 12.jpg)")
-uploaded = files.upload()
-
-# 📂 Step 3: Create output folder
-os.makedirs("Output", exist_ok=True)
-
-# 📷 Step 4: Define all required functions
-def kmeans(X, k, max_iters=1000, epsilon=1e-4):
+def kmeans_multithreaded(
+    image, K=2, max_iters=10, color_space="Lab", channels=[1], num_threads=8
+):
+    """
+    Perform K-means clustering on an image using multithreading for faster processing
+    Args:
+        image: Input image (BGR format)
+        K: Number of clusters
+        max_iters: Maximum number of iterations
+        color_space: Color space to use ("BGR", "HSV", "Lab", "YCbCr")
+        channels: List of channels to use for clustering
+        num_threads: Number of threads to use for parallel processing
+    Returns:
+        segmented: Segmented image as grayscale
+    """
+    # Color space conversions
+    if color_space == "HSV":
+        image_cs = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    elif color_space == "Lab":
+        image_cs = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)
+    elif color_space == "YCbCr":
+        image_cs = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+    else:
+        image_cs = image.copy()
+        
+    # Extract selected channels
+    img_data = image_cs[:, :, channels]
+    pixels = img_data.reshape(-1, len(channels)).astype(np.float32)
+    
+    # Initialize centroids randomly
     np.random.seed(42)
-    centroids = X[np.random.choice(len(X), k, replace=False)]
+    centroids = pixels[np.random.choice(len(pixels), K, replace=False)]
+    labels = np.zeros(len(pixels), dtype=np.int32)
+    
     for _ in range(max_iters):
-        distances = np.linalg.norm(X[:, None] - centroids[None, :], axis=2)
-        labels = np.argmin(distances, axis=1)
-        new_centroids = np.array([
-            X[labels == i].mean(axis=0) if np.any(labels == i) else centroids[i]
-            for i in range(k)
-        ])
-        shift = np.linalg.norm(new_centroids - centroids)
-        if shift < epsilon:
-            break
-        centroids = new_centroids
-    return labels, centroids
+        # Assign labels with multithreading for faster processing
+        num_threads = num_threads
+        chunk_size = len(pixels) // num_threads
+        threads = []
+        
+        for t in range(num_threads):
+            start = t * chunk_size
+            end = len(pixels) if t == num_threads - 1 else (t + 1) * chunk_size
+            thread = Thread(
+                target=assign_labels_thread,
+                args=(start, end, pixels, centroids, labels),
+            )
+            thread.start()
+            threads.append(thread)
+            
+        for thread in threads:
+            thread.join()
+            
+        # Update centroids
+        for k in range(K):
+            cluster_points = pixels[labels == k]
+            if len(cluster_points) > 0:
+                centroids[k] = np.mean(cluster_points, axis=0)
+                
+    segmented = labels.reshape(image.shape[:2])
+    
+    # Map clusters to grayscale intensities
+    unique_labels, counts = np.unique(segmented, return_counts=True)
+    sorted_indices = np.argsort(-counts)
+    grayscale_map = np.zeros(K, dtype=np.uint8)
+    
+    for i, idx in enumerate(sorted_indices):
+        grayscale_map[idx] = int(255 * (i / (K - 1))) if K > 1 else 255
+        
+    final_image = np.zeros_like(segmented, dtype=np.uint8)
+    for k in range(K):
+        final_image[segmented == k] = grayscale_map[k]
+        
+    return final_image 
 
-def segment_image_with_kmeans(image_path, k):
+def load_image(image_path):
+    """
+    Load an image from the specified path
+    Args:
+        image_path: Path to the image file
+    Returns:
+        image: Loaded image in BGR format
+    """
     image = cv2.imread(image_path)
     if image is None:
-        raise FileNotFoundError(f"❌ Error: Could not load image at {image_path}")
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    pixel_values = image.reshape((-1, 3)).astype(np.float32)
-    labels, centroids = kmeans(pixel_values, k)
-    segmented_image = centroids[labels].reshape(image.shape).astype(np.uint8)
-    return image, segmented_image, labels.reshape(image.shape[:2])
+        raise FileNotFoundError(f"Could not load image from {image_path}")
+    return image
 
-def extract_number_mask(labels, target_cluster):
-    return (labels == target_cluster).astype(np.uint8) * 255
+def display_image(image, window_name="Image"):
+    """
+    Display an image in Google Colab
+    Args:
+        image: Image to display
+        window_name: Name for the display window
+    """
+    # For Google Colab, we use cv2_imshow and print the window name
+    print(f"--- {window_name} ---")
+    cv2_imshow(image)
+    # No need for waitKey or destroyAllWindows in Colab
 
-def refine_mask(mask):
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
-    return closed
+def save_image(image, output_path):
+    """
+    Save an image to the specified path
+    Args:
+        image: Image to save
+        output_path: Path where the image will be saved
+    Returns:
+        success: Boolean indicating if the save was successful
+    """
+    return cv2.imwrite(output_path, image)
 
-# 🧠 Step 5: Run the main pipeline
-try:
-    # Automatically get uploaded file name
-    uploaded_filename = list(uploaded.keys())[0]
-    image_path = uploaded_filename
-    input_number = os.path.splitext(uploaded_filename)[0]
-    k = 12  # Change this value if needed
+# For Google Colab file upload
+from google.colab import files
 
-    original, segmented, label_map = segment_image_with_kmeans(image_path, k)
+# Upload multiple images
+print("Please upload your images (you can select multiple files)...")
+uploaded = files.upload()
+uploaded_filenames = list(uploaded.keys())
+print(f"Uploaded {len(uploaded_filenames)} files: {', '.join(uploaded_filenames)}")
 
-    print("✅ Showing each cluster so you can pick the one(s) with the number:")
-    cluster_masks = []
-    for i in range(k):
-        raw_mask = extract_number_mask(label_map, target_cluster=i)
-        refined_mask = refine_mask(raw_mask)
-        cluster_masks.append(refined_mask)
+# Configuration
+K_CLUSTERS = 3  # Number of clusters for segmentation
+MAX_ITERATIONS = 10  # Maximum iterations for K-means
+COLOR_SPACE = "Lab"  # Color space to use
+CHANNELS = [1]  # Channels to use for clustering (e.g., [1] for 'a' channel in Lab)
+NUM_THREADS = 8  # Number of threads for parallel processing
+OUTPUT_DIR = "segmented_images"  # Directory to save output images
 
-        plt.imshow(refined_mask, cmap='gray')
-        plt.title(f"Cluster {i}")
-        plt.axis('off')
-        plt.show()
+# Create output directory if it doesn't exist
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
 
-    TARGET_CLUSTERS = input("Enter the cluster indices (comma-separated) that contain the number: ")
-    target_indices = [int(i.strip()) for i in TARGET_CLUSTERS.split(",")]
+def process_image(input_filename):
+    """
+    Process a single image with K-means segmentation
+    Args:
+        input_filename: Filename of the input image
+    Returns:
+        success: Boolean indicating if processing was successful
+    """
+    try:
+        # Generate output filename
+        output_filename = os.path.join(OUTPUT_DIR, "segmented_" + input_filename)
+        
+        # Load the image
+        print(f"\nProcessing: {input_filename}")
+        image = load_image(input_filename)
+        
+        # Display original image
+        print("Original Image:")
+        display_image(image, f"Original: {input_filename}")
+        
+        # Perform k-means segmentation
+        print(f"Performing K-means segmentation with {K_CLUSTERS} clusters...")
+        segmented = kmeans_multithreaded(
+            image,
+            K=K_CLUSTERS,
+            max_iters=MAX_ITERATIONS,
+            color_space=COLOR_SPACE,
+            channels=CHANNELS,
+            num_threads=NUM_THREADS,
+        )
+        
+        # Display the result
+        print("Segmented Image:")
+        display_image(segmented, f"Segmented: {input_filename}")
+        
+        # Save the result
+        save_image(segmented, output_filename)
+        print(f"Segmented image saved to {output_filename}")
+        
+        return True
+    except Exception as e:
+        print(f"Error processing {input_filename}: {str(e)}")
+        return False
 
-    combined_mask = np.zeros_like(cluster_masks[0])
-    for idx in target_indices:
-        combined_mask = cv2.bitwise_or(combined_mask, cluster_masks[idx])
-    number_mask = combined_mask
+def main():
+    successful_files = []
+    failed_files = []
+    
+    # Process each uploaded image
+    for filename in uploaded_filenames:
+        if process_image(filename):
+            successful_files.append(filename)
+        else:
+            failed_files.append(filename)
+    
+    # Summary
+    print("\n--- Processing Summary ---")
+    print(f"Successfully processed {len(successful_files)} images:")
+    for f in successful_files:
+        print(f"  - {f} → segmented_{f}")
+    
+    if failed_files:
+        print(f"\nFailed to process {len(failed_files)} images:")
+        for f in failed_files:
+            print(f"  - {f}")
+    
+    # Download all segmented images as a zip file
+    if successful_files:
+        print("\nCreating ZIP file with all segmented images...")
+        zip_filename = "segmented_images.zip"
+        !zip -j {zip_filename} {OUTPUT_DIR}/*
+        files.download(zip_filename)
+        print(f"Download initiated for {zip_filename}")
 
-    # Save mask
-    output_path = f"Output/{input_number}_number_mask.png"
-    cv2.imwrite(output_path, number_mask)
-    print(f"✅ Saved extracted mask to: {output_path}")
-
-    # Visualize results
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 3, 1)
-    plt.title("Original Image")
-    plt.imshow(original)
-    plt.axis('off')
-
-    plt.subplot(1, 3, 2)
-    plt.title("Segmented Image")
-    plt.imshow(segmented)
-    plt.axis('off')
-
-    plt.subplot(1, 3, 3)
-    plt.title("Extracted Number Mask")
-    plt.imshow(number_mask, cmap='gray')
-    plt.axis('off')
-    plt.show()
-
-except FileNotFoundError as e:
-    print(e)
-except Exception as e:
-    print(f"⚠️ An error occurred: {str(e)}")
+if __name__ == "__main__":
+    main()
